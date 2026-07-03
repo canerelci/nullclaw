@@ -1174,6 +1174,10 @@ pub const McpServerConfig = struct {
     command: []const u8,
     args: []const []const u8 = &.{},
     env: []const McpEnvEntry = &.{},
+    // Working directory for the subprocess. Empty = inherit the parent's cwd.
+    // The MCP config's `cwd` field is essential for servers like `python3 -m mcp_server`
+    // that must run from a specific package root, regardless of the launcher's cwd.
+    cwd: []const u8 = "",
 
     pub const McpEnvEntry = struct {
         key: []const u8,

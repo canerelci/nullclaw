@@ -59,28 +59,21 @@ pub const McpServer = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
 
-        // Build environment: inherit parent + config overrides
-        var env = std.process.EnvMap.init(self.allocator);
-        // Add PATH, HOME, etc. from parent
-        const inherit_vars = [_][]const u8{
-            "PATH",              "HOME",        "TERM",    "LANG",         "LC_ALL",
-            "LC_CTYPE",          "USER",        "SHELL",   "TMPDIR",       "NODE_PATH",
-            "NPM_CONFIG_PREFIX",
-            // Windows-specific
-            "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP",
-            "TMP",               "SYSTEMROOT",  "COMSPEC", "PROGRAMFILES", "WINDIR",
-        };
-        for (&inherit_vars) |key| {
-            if (platform.getEnvOrNull(self.allocator, key)) |val| {
-                defer self.allocator.free(val);
-                try env.put(key, val);
-            }
-        }
-        // Config env overrides
+        // Build environment: inherit the FULL parent environment, then apply config
+        // overrides. MCP tools frequently need arbitrary env vars (API keys like
+        // GEMINI_API_KEY / FALAI_API_KEY, DB URLs) — a restrictive whitelist breaks them.
+        var env = std.process.getEnvMap(self.allocator) catch std.process.EnvMap.init(self.allocator);
+        // Config env overrides (highest precedence)
         for (self.config.env) |entry| {
             try env.put(entry.key, entry.value);
         }
         child.env_map = &env;
+
+        // Working directory from config (critical for servers that must run from a
+        // package root, e.g. `python3 -m mcp_server`). Empty = inherit.
+        if (self.config.cwd.len > 0) {
+            child.cwd = self.config.cwd;
+        }
 
         try child.spawn();
         self.child = child;

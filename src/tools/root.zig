@@ -478,6 +478,49 @@ pub fn deinitTools(allocator: std.mem.Allocator, tools: []const Tool) void {
     allocator.free(tools);
 }
 
+/// Filter a tool set to an allowlist of names (NCW specialist gating).
+///
+/// `allow_csv` is a comma-separated list of tool names. Semantics:
+///   - empty string ("")  → ZERO tools (the specialist is prompt-fed, no tool access);
+///   - "a,b,c"            → only tools whose `name()` matches one of a/b/c;
+///   - passing `null`/not filtering → caller keeps the full set.
+///
+/// Returns a freshly allocated `[]Tool` of *copies* (Tool is a {ptr,vtable} fat
+/// pointer). The underlying wrappers stay owned by the ORIGINAL slice — call
+/// `deinitTools` on the original, NOT on the filtered subset (it would double-
+/// free the wrappers). Free only the returned slice with `allocator.free`.
+/// Unmatched allowlist names are silently dropped (best-effort, for forward-compat
+/// when a named tool isn't available in a given build/config).
+pub fn filterToolsByName(
+    allocator: std.mem.Allocator,
+    tools: []const Tool,
+    allow_csv: []const u8,
+) ![]Tool {
+    // Empty allowlist → explicitly NO tools.
+    if (allow_csv.len == 0) return try allocator.alloc(Tool, 0);
+
+    var names: std.ArrayList([]const u8) = .{};
+    defer names.deinit(allocator);
+    var it = std.mem.splitScalar(u8, allow_csv, ',');
+    while (it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t\n");
+        if (trimmed.len > 0) try names.append(allocator, trimmed);
+    }
+
+    var out: std.ArrayList(Tool) = .{};
+    errdefer out.deinit(allocator);
+    for (tools) |t| {
+        const nm = t.name();
+        for (names.items) |want| {
+            if (std.mem.eql(u8, nm, want)) {
+                try out.append(allocator, t);
+                break;
+            }
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// Create restricted tool set for subagents.
 /// Includes: shell, file_read, file_write, file_edit, git, http (if enabled).
 /// Excludes: message, spawn, delegate, schedule, memory, composio, browser —
@@ -799,4 +842,52 @@ test "bindMemoryTools matches by vtable, not by colliding tool name" {
 
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+test "filterToolsByName: empty allowlist yields zero tools" {
+    // No-allocation smoke: empty csv → 0-length slice (prompt-fed specialists).
+    const empty: []const Tool = &.{};
+    const out = try filterToolsByName(std.testing.allocator, empty, "");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "filterToolsByName: subset selection + unknown dropped" {
+    // Three fake tools (a, b, c). Allow "a,c,zzz" → keeps a and c, drops b and
+    // the unknown "zzz". Confirms subset filtering and graceful unknown drop.
+    const FakeTool = struct {
+        n: []const u8,
+        const vtable = Tool.VTable{
+            .execute = &execImpl,
+            .name = &nameImpl,
+            .description = &descImpl,
+            .parameters_json = &paramsImpl,
+            .deinit = null,
+        };
+        fn execImpl(_: *anyopaque, _: std.mem.Allocator, _: JsonObjectMap) anyerror!ToolResult {
+            return ToolResult.ok("");
+        }
+        fn nameImpl(ptr: *anyopaque) []const u8 {
+            const self: *const @This() = @ptrCast(@alignCast(ptr));
+            return self.n;
+        }
+        fn descImpl(_: *anyopaque) []const u8 {
+            return "";
+        }
+        fn paramsImpl(_: *anyopaque) []const u8 {
+            return "{}";
+        }
+        fn tool(self: *@This()) Tool {
+            return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+        }
+    };
+    var a = FakeTool{ .n = "a" };
+    var b = FakeTool{ .n = "b" };
+    var c = FakeTool{ .n = "c" };
+    const tools: []const Tool = &.{ a.tool(), b.tool(), c.tool() };
+    const out = try filterToolsByName(std.testing.allocator, tools, "a,c,zzz");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 2), out.len);
+    try std.testing.expectEqualStrings("a", out[0].name());
+    try std.testing.expectEqualStrings("c", out[1].name());
 }

@@ -779,7 +779,9 @@ fn parseToolCallJsonInner(allocator: std.mem.Allocator, parsed: std.json.Parsed(
     if (resolved_name.len == 0) return error.EmptyToolName;
 
     // Extract arguments — re-serialize to JSON string
-    const args_json = if (obj.get("arguments")) |args_val| blk: {
+    // Some LLMs (Llama/Groq) use "parameters" instead of "arguments"
+    const args_val_opt = obj.get("arguments") orelse obj.get("parameters");
+    const args_json = if (args_val_opt) |args_val| blk: {
         switch (args_val) {
             .string => |s| {
                 // Arguments is a string (possibly a JSON string) — use as-is

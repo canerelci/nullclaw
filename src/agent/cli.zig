@@ -76,6 +76,14 @@ const ParsedAgentArgs = struct {
     provider_override: ?[]const u8 = null,
     model_override: ?[]const u8 = null,
     temperature_override: ?f64 = null,
+    // NCW specialist tool allowlist (comma-separated tool names; empty string =
+    // NO tools). When set, the agent runs with only those tools (or none). Absent
+    // → full tool set (backward-compatible for the main agent / gateway / REPL).
+    tools_allow: ?[]const u8 = null,
+    // Diagnostic: build the full tool set, dump every tool name to stderr as
+    // JSON, then exit. Used by the NCW admin UI to populate its tool picker with
+    // the EXACT names that --tools filters on (built-in + MCP, runtime-resolved).
+    list_tools: bool = false,
 };
 
 const AgentArgParseResult = union(enum) {
@@ -110,6 +118,14 @@ fn parseAgentArgs(args: []const []const u8) AgentArgParseResult {
             i += 1;
             const temp = std.fmt.parseFloat(f64, args[i]) catch return .{ .invalid_temperature = args[i] };
             parsed.temperature_override = temp;
+        } else if (std.mem.eql(u8, arg, "--tools")) {
+            // NCW specialist gating: comma-separated allowlist ("" = no tools).
+            if (i + 1 >= args.len) return .{ .missing_value = arg };
+            i += 1;
+            parsed.tools_allow = args[i];
+        } else if (std.mem.eql(u8, arg, "--list-tools")) {
+            // Diagnostic flag: dump resolved tool names and exit (see struct doc).
+            parsed.list_tools = true;
         }
     }
     return .{ .ok = parsed };
@@ -147,8 +163,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     }
 
     cfg.validate() catch |err| {
-        Config.printValidationError(err);
-        return;
+        // --list-tools only needs the tool catalog (built-in + MCP); a missing
+        // default model is irrelevant, so don't block the dump on it.
+        if (!parsed_args.list_tools) {
+            Config.printValidationError(err);
+            return;
+        }
     };
 
     // Ensure lifecycle parity: seed workspace files on first agent run
@@ -208,7 +228,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     defer subagent_manager.deinit();
 
     // Create tools (with agents config for delegate depth enforcement)
-    const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
+    const built_tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
         .http_enabled = cfg.http_request.enabled,
         .http_allowed_domains = cfg.http_request.allowed_domains,
         .http_max_response_size = cfg.http_request.max_response_size,
@@ -225,7 +245,34 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .policy = &policy,
         .subagent_manager = &subagent_manager,
     });
-    defer tools_mod.deinitTools(allocator, tools);
+    defer tools_mod.deinitTools(allocator, built_tools);
+
+    // Diagnostic: dump every resolved tool name (built-in + MCP) as a JSON array
+    // to stderr, then exit cleanly. The NCW admin UI uses this to populate its
+    // tool picker with the exact names that --tools filters on.
+    if (parsed_args.list_tools) {
+        // Dump every resolved tool name (built-in + MCP) as a JSON array to
+        // STDOUT (clean, separate from the log chatter on stderr).
+        try w.writeAll("[");
+        for (built_tools, 0..) |t, idx| {
+            if (idx > 0) try w.writeAll(",");
+            try w.print("\"{s}\"", .{t.name()});
+        }
+        try w.writeAll("]\n");
+        try w.flush();
+        return;
+    }
+
+    // NCW specialist tool gating: when --tools is passed, narrow the tool set to
+    // the allowlist (empty string = NO tools). The filtered slice holds Tool
+    // *copies* (fat pointers); the underlying wrappers stay owned by built_tools
+    // above, so we free only the filtered slice, never deinitTools on it.
+    const filtered_tools: ?[]tools_mod.Tool = if (parsed_args.tools_allow) |allow|
+        try tools_mod.filterToolsByName(allocator, built_tools, allow)
+    else
+        null;
+    defer if (filtered_tools) |ft| allocator.free(ft);
+    const tools: []const tools_mod.Tool = filtered_tools orelse built_tools;
 
     // Create memory (optional — don't fail if it can't init)
     var mem_rt = memory_mod.initRuntime(allocator, &cfg.memory, cfg.workspace_dir);

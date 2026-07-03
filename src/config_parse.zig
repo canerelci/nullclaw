@@ -483,10 +483,12 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     if (a == .array) mcp_cfg.args = try parseStringArray(self.allocator, a.array);
                 }
 
-                // env: object of string→string
+                // env: two accepted shapes —
+                //   (a) object of string→string: {"KEY": "v", ...}
+                //   (b) array of {key,value}: [{"key":"K","value":"v"}, ...]  (our config.json format)
                 if (val.object.get("env")) |e| {
+                    var env_list: std.ArrayListUnmanaged(types.McpServerConfig.McpEnvEntry) = .empty;
                     if (e == .object) {
-                        var env_list: std.ArrayListUnmanaged(types.McpServerConfig.McpEnvEntry) = .empty;
                         var eit = e.object.iterator();
                         while (eit.next()) |ee| {
                             if (ee.value_ptr.* == .string) {
@@ -496,7 +498,26 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 });
                             }
                         }
-                        mcp_cfg.env = try env_list.toOwnedSlice(self.allocator);
+                    } else if (e == .array) {
+                        for (e.array.items) |item| {
+                            if (item != .object) continue;
+                            const kk = item.object.get("key") orelse continue;
+                            const vv = item.object.get("value") orelse continue;
+                            if (kk == .string and vv == .string) {
+                                try env_list.append(self.allocator, .{
+                                    .key = try self.allocator.dupe(u8, kk.string),
+                                    .value = try self.allocator.dupe(u8, vv.string),
+                                });
+                            }
+                        }
+                    }
+                    mcp_cfg.env = try env_list.toOwnedSlice(self.allocator);
+                }
+
+                // cwd: working directory for the subprocess (optional).
+                if (val.object.get("cwd")) |c| {
+                    if (c == .string and c.string.len > 0) {
+                        mcp_cfg.cwd = try self.allocator.dupe(u8, c.string);
                     }
                 }
 
