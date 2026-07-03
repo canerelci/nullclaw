@@ -182,9 +182,21 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     const message_arg = parsed_args.message_arg;
     const session_id = parsed_args.session_id;
 
-    // Create a noop observer
+    // Observer: when NULLCLAW_TRACE_FILE is set (the host passes it per delegation),
+    // write a JSONL trace of this agent run's internal steps — agent_start/end,
+    // llm_request/llm_response, tool_call_start/tool_call (incl. file ops + MCP
+    // calls), errors — so the host can ingest it and surface NCW internals in its
+    // flow log. Otherwise noop (zero overhead). The path is unique per run, so the
+    // FileObserver just appends.
     var noop = observability.NoopObserver{};
-    const obs = noop.observer();
+    var file_obs: observability.FileObserver = undefined;
+    var obs = noop.observer();
+    const trace_path: ?[]u8 = std.process.getEnvVarOwned(allocator, "NULLCLAW_TRACE_FILE") catch null;
+    defer if (trace_path) |p| allocator.free(p);
+    if (trace_path) |p| {
+        file_obs = .{ .path = p };
+        obs = file_obs.observer();
+    }
 
     // Record agent start
     const start_event = ObserverEvent{ .agent_start = .{
