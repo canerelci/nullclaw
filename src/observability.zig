@@ -4,11 +4,11 @@ const Atomic = @import("portable_atomic.zig").Atomic;
 /// Events the observer can record.
 pub const ObserverEvent = union(enum) {
     agent_start: struct { provider: []const u8, model: []const u8 },
-    llm_request: struct { provider: []const u8, model: []const u8, messages_count: usize },
-    llm_response: struct { provider: []const u8, model: []const u8, duration_ms: u64, success: bool, error_message: ?[]const u8 },
+    llm_request: struct { provider: []const u8, model: []const u8, messages_count: usize, messages: ?[]const u8 = null },
+    llm_response: struct { provider: []const u8, model: []const u8, duration_ms: u64, success: bool, error_message: ?[]const u8, content: ?[]const u8 = null },
     agent_end: struct { duration_ms: u64, tokens_used: ?u64 },
-    tool_call_start: struct { tool: []const u8 },
-    tool_call: struct { tool: []const u8, duration_ms: u64, success: bool, detail: ?[]const u8 = null },
+    tool_call_start: struct { tool: []const u8, arguments: ?[]const u8 = null },
+    tool_call: struct { tool: []const u8, duration_ms: u64, success: bool, detail: ?[]const u8 = null, arguments: ?[]const u8 = null },
     tool_iterations_exhausted: struct { iterations: u32 },
     turn_complete: void,
     channel_message: struct { channel: []const u8, direction: []const u8 },
@@ -286,30 +286,73 @@ pub const FileObserver = struct {
 
     fn fileRecordEvent(ptr: *anyopaque, event: *const ObserverEvent) void {
         const self = resolve(ptr);
-        var buf: [2048]u8 = undefined;
-        const line = switch (event.*) {
-            .agent_start => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"agent_start\",\"provider\":\"{s}\",\"model\":\"{s}\"}}", .{ e.provider, e.model }) catch return,
-            .llm_request => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"llm_request\",\"provider\":\"{s}\",\"model\":\"{s}\",\"messages_count\":{d}}}", .{ e.provider, e.model, e.messages_count }) catch return,
-            .llm_response => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"llm_response\",\"provider\":\"{s}\",\"model\":\"{s}\",\"duration_ms\":{d},\"success\":{}}}", .{ e.provider, e.model, e.duration_ms, e.success }) catch return,
-            .agent_end => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"agent_end\",\"duration_ms\":{d}}}", .{e.duration_ms}) catch return,
-            .tool_call_start => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"tool_call_start\",\"tool\":\"{s}\"}}", .{e.tool}) catch return,
-            .tool_call => |e| blk: {
-                if (detailForObserver(e.detail)) |detail| {
-                    break :blk std.fmt.bufPrint(
-                        &buf,
-                        "{{\"event\":\"tool_call\",\"tool\":\"{s}\",\"duration_ms\":{d},\"success\":{},\"detail\":{f}}}",
-                        .{ e.tool, e.duration_ms, e.success, std.json.fmt(detail, .{}) },
-                    ) catch return;
-                }
-                break :blk std.fmt.bufPrint(&buf, "{{\"event\":\"tool_call\",\"tool\":\"{s}\",\"duration_ms\":{d},\"success\":{}}}", .{ e.tool, e.duration_ms, e.success }) catch return;
+        // Dynamically sized line: prompts/args/results routinely exceed any fixed
+        // buffer, so build the JSONL line into a growable list (page_allocator,
+        // freed below). This is the path NULLCLAW_TRACE_FILE consumes — the host
+        // ingests it, so arguments/messages/content MUST land here untruncated.
+        const a = std.heap.page_allocator;
+        var line = std.ArrayListUnmanaged(u8){};
+        defer line.deinit(a);
+        const w = line.writer(a);
+
+        switch (event.*) {
+            .agent_start => |e| {
+                w.print("{{\"event\":\"agent_start\",\"provider\":{f},\"model\":{f}}}", .{ std.json.fmt(e.provider, .{}), std.json.fmt(e.model, .{}) }) catch return;
             },
-            .tool_iterations_exhausted => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"tool_iterations_exhausted\",\"iterations\":{d}}}", .{e.iterations}) catch return,
-            .turn_complete => std.fmt.bufPrint(&buf, "{{\"event\":\"turn_complete\"}}", .{}) catch return,
-            .channel_message => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"channel_message\",\"channel\":\"{s}\",\"direction\":\"{s}\"}}", .{ e.channel, e.direction }) catch return,
-            .heartbeat_tick => std.fmt.bufPrint(&buf, "{{\"event\":\"heartbeat_tick\"}}", .{}) catch return,
-            .err => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"error\",\"component\":\"{s}\",\"message\":\"{s}\"}}", .{ e.component, e.message }) catch return,
-        };
-        self.appendToFile(line);
+            .llm_request => |e| {
+                w.print("{{\"event\":\"llm_request\",\"provider\":{f},\"model\":{f},\"messages_count\":{d}", .{ std.json.fmt(e.provider, .{}), std.json.fmt(e.model, .{}), e.messages_count }) catch return;
+                if (e.messages) |m| {
+                    if (m.len > 0) w.print(",\"messages\":{f}", .{std.json.fmt(m, .{})}) catch return;
+                }
+                w.writeAll("}") catch return;
+            },
+            .llm_response => |e| {
+                w.print("{{\"event\":\"llm_response\",\"provider\":{f},\"model\":{f},\"duration_ms\":{d},\"success\":{}", .{ std.json.fmt(e.provider, .{}), std.json.fmt(e.model, .{}), e.duration_ms, e.success }) catch return;
+                if (e.content) |c| {
+                    if (c.len > 0) w.print(",\"content\":{f}", .{std.json.fmt(c, .{})}) catch return;
+                }
+                if (e.error_message) |em| {
+                    if (em.len > 0) w.print(",\"error\":{f}", .{std.json.fmt(em, .{})}) catch return;
+                }
+                w.writeAll("}") catch return;
+            },
+            .agent_end => |e| {
+                w.print("{{\"event\":\"agent_end\",\"duration_ms\":{d}}}", .{e.duration_ms}) catch return;
+            },
+            .tool_call_start => |e| {
+                w.print("{{\"event\":\"tool_call_start\",\"tool\":{f}", .{std.json.fmt(e.tool, .{})}) catch return;
+                if (e.arguments) |arg| {
+                    if (arg.len > 0) w.print(",\"arguments\":{f}", .{std.json.fmt(arg, .{})}) catch return;
+                }
+                w.writeAll("}") catch return;
+            },
+            .tool_call => |e| {
+                w.print("{{\"event\":\"tool_call\",\"tool\":{f},\"duration_ms\":{d},\"success\":{}", .{ std.json.fmt(e.tool, .{}), e.duration_ms, e.success }) catch return;
+                if (e.detail) |d| {
+                    if (d.len > 0) w.print(",\"detail\":{f}", .{std.json.fmt(d, .{})}) catch return;
+                }
+                if (e.arguments) |arg| {
+                    if (arg.len > 0) w.print(",\"arguments\":{f}", .{std.json.fmt(arg, .{})}) catch return;
+                }
+                w.writeAll("}") catch return;
+            },
+            .tool_iterations_exhausted => |e| {
+                w.print("{{\"event\":\"tool_iterations_exhausted\",\"iterations\":{d}}}", .{e.iterations}) catch return;
+            },
+            .turn_complete => {
+                w.writeAll("{\"event\":\"turn_complete\"}") catch return;
+            },
+            .channel_message => |e| {
+                w.print("{{\"event\":\"channel_message\",\"channel\":{f},\"direction\":{f}}}", .{ std.json.fmt(e.channel, .{}), std.json.fmt(e.direction, .{}) }) catch return;
+            },
+            .heartbeat_tick => {
+                w.writeAll("{\"event\":\"heartbeat_tick\"}") catch return;
+            },
+            .err => |e| {
+                w.print("{{\"event\":\"error\",\"component\":{f},\"message\":{f}}}", .{ std.json.fmt(e.component, .{}), std.json.fmt(e.message, .{}) }) catch return;
+            },
+        }
+        self.appendToFile(line.items);
     }
 
     fn fileRecordMetric(ptr: *anyopaque, metric: *const ObserverMetric) void {

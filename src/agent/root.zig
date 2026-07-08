@@ -770,14 +770,6 @@ pub const Agent = struct {
             }
         }
 
-        // Record agent event
-        const start_event = ObserverEvent{ .llm_request = .{
-            .provider = self.provider.getName(),
-            .model = self.model_name,
-            .messages_count = self.history.items.len,
-        } };
-        self.observer.recordEvent(&start_event);
-
         // Tool call loop — reuse a single arena across iterations (retains pages)
         var iter_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer iter_arena.deinit();
@@ -790,6 +782,19 @@ pub const Agent = struct {
 
             // Build messages slice for provider (arena-owned; freed at end of iteration)
             const messages = try self.buildProviderMessages(arena);
+
+            // Record LLM request with the serialized prompt. Emitted per actual
+            // provider call (one per iteration) so llm_request and llm_response
+            // stay 1:1 and each carries the exact messages sent. messages_json is
+            // arena-owned and only borrowed for the synchronous recordEvent call.
+            const messages_json = Agent.serializeMessagesForTrace(arena, messages) catch null;
+            const start_event = ObserverEvent{ .llm_request = .{
+                .provider = self.provider.getName(),
+                .model = self.model_name,
+                .messages_count = messages.len,
+                .messages = messages_json,
+            } };
+            self.observer.recordEvent(&start_event);
 
             const timer_start = std.time.milliTimestamp();
             const is_streaming = self.stream_callback != null and self.provider.supportsStreaming();
@@ -939,6 +944,7 @@ pub const Agent = struct {
                 .duration_ms = duration_ms,
                 .success = true,
                 .error_message = null,
+                .content = response.content,
             } };
             self.observer.recordEvent(&resp_event);
 
@@ -1152,7 +1158,10 @@ pub const Agent = struct {
                     );
                 }
 
-                const tool_start_event = ObserverEvent{ .tool_call_start = .{ .tool = call.name } };
+                const tool_start_event = ObserverEvent{ .tool_call_start = .{
+                    .tool = call.name,
+                    .arguments = if (call.arguments_json.len > 0) call.arguments_json else null,
+                } };
                 self.observer.recordEvent(&tool_start_event);
 
                 const tool_timer = std.time.milliTimestamp();
@@ -1178,7 +1187,8 @@ pub const Agent = struct {
                     .tool = call.name,
                     .duration_ms = tool_duration,
                     .success = result.success,
-                    .detail = if (result.success) null else result.output,
+                    .detail = if (result.output.len > 0) result.output else null,
+                    .arguments = if (call.arguments_json.len > 0) call.arguments_json else null,
                 } };
                 self.observer.recordEvent(&tool_event);
 
@@ -1574,6 +1584,27 @@ pub const Agent = struct {
         return multimodal.prepareMessagesForProvider(arena, m, .{
             .allowed_dirs = allowed,
         });
+    }
+
+    /// Serialize a messages slice to a compact JSON array of `{role,content}` pairs
+    /// for the observer trace. Captures the text prompt the model actually saw
+    /// (system + user + assistant + tool-result text) without multimodal
+    /// `content_parts` (base64 image data), keeping the trace compact. Result is
+    /// arena-owned; caller must ensure it outlives any borrow.
+    fn serializeMessagesForTrace(arena: std.mem.Allocator, messages: []const ChatMessage) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(arena);
+        const w = buf.writer(arena);
+        try w.writeByte('[');
+        for (messages, 0..) |msg, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"role\":{f},\"content\":{f}}}", .{
+                std.json.fmt(msg.role.toSlice(), .{}),
+                std.json.fmt(msg.content, .{}),
+            });
+        }
+        try w.writeByte(']');
+        return buf.toOwnedSlice(arena);
     }
 
     fn appendMultimodalAllowedDir(
