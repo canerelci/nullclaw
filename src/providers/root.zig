@@ -920,6 +920,54 @@ test "ChatMessage with content_parts set" {
     try std.testing.expect(msg.content_parts.?[1] == .image_url);
 }
 
+test "AttributionHeaders: gateway base_url emits three X-Pryva-* headers" {
+    const msgs = [_]ChatMessage{ChatMessage.user("hi")};
+    const req = ChatRequest{
+        .messages = &msgs,
+        .attribution = .{ .agent = "planner", .task = "weekly_plan" },
+    };
+    var ah: AttributionHeaders = .{};
+    ah.build(req, "https://pryva.io/llm/groq/openai/v1");
+    const hdrs = ah.slice();
+    try std.testing.expectEqual(@as(usize, 3), hdrs.len);
+    try std.testing.expectEqualStrings("X-Pryva-Caller: ncw", hdrs[0]);
+    try std.testing.expectEqualStrings("X-Pryva-Agent: planner", hdrs[1]);
+    try std.testing.expectEqualStrings("X-Pryva-Task: weekly_plan", hdrs[2]);
+}
+
+test "AttributionHeaders: non-gateway base_url emits nothing" {
+    const msgs = [_]ChatMessage{ChatMessage.user("hi")};
+    const req = ChatRequest{
+        .messages = &msgs,
+        .attribution = .{ .agent = "planner", .task = "planner" },
+    };
+    var ah: AttributionHeaders = .{};
+    ah.build(req, "https://api.groq.com/openai/v1");
+    try std.testing.expectEqual(@as(usize, 0), ah.slice().len);
+}
+
+test "AttributionHeaders: no attribution emits nothing even on gateway url" {
+    const msgs = [_]ChatMessage{ChatMessage.user("hi")};
+    const req = ChatRequest{ .messages = &msgs };
+    var ah: AttributionHeaders = .{};
+    ah.build(req, "https://pryva.io/llm/xai/v1");
+    try std.testing.expectEqual(@as(usize, 0), ah.slice().len);
+}
+
+test "AttributionHeaders: empty agent/task collapse to unknown (fail-open)" {
+    const msgs = [_]ChatMessage{ChatMessage.user("hi")};
+    const req = ChatRequest{
+        .messages = &msgs,
+        .attribution = .{ .agent = "", .task = "" },
+    };
+    var ah: AttributionHeaders = .{};
+    ah.build(req, "https://pryva.io/llm/anthropic");
+    const hdrs = ah.slice();
+    try std.testing.expectEqual(@as(usize, 3), hdrs.len);
+    try std.testing.expectEqualStrings("X-Pryva-Agent: unknown", hdrs[1]);
+    try std.testing.expectEqualStrings("X-Pryva-Task: unknown", hdrs[2]);
+}
+
 test {
     // Run tests from all sub-modules
     std.testing.refAllDecls(@This());
