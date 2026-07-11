@@ -295,10 +295,22 @@ pub const AnthropicProvider = struct {
         var version_hdr_buf: [64]u8 = undefined;
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
 
+        // Pryva spend-attribution headers (gateway base_url only). Stack-lived; outlive the call.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, self.base_url);
+        var headers_buf: [5][]const u8 = undefined;
+        headers_buf[0] = auth_hdr;
+        headers_buf[1] = version_hdr;
+        var hdr_count: usize = 2;
+        for (attr_hdrs.slice()) |h| {
+            headers_buf[hdr_count] = h;
+            hdr_count += 1;
+        }
+
         const resp_body = if (is_oauth)
             curlPostOAuth(allocator, url, body, auth_hdr, version_hdr) catch return error.AnthropicApiError
         else
-            root.curlPostTimed(allocator, url, body, &.{ auth_hdr, version_hdr }, request.timeout_secs) catch return error.AnthropicApiError;
+            root.curlPostTimed(allocator, url, body, headers_buf[0..hdr_count], request.timeout_secs) catch return error.AnthropicApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);
@@ -351,8 +363,10 @@ pub const AnthropicProvider = struct {
         var version_hdr_buf: [64]u8 = undefined;
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
 
-        // Build headers array (up to 4: auth, version, optional beta, optional user-agent)
-        var headers_buf: [4][]const u8 = undefined;
+        // Build headers array (auth, version, optional beta, + up to 3 Pryva attribution)
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, self.base_url);
+        var headers_buf: [6][]const u8 = undefined;
         var hdr_count: usize = 0;
         headers_buf[hdr_count] = auth_hdr;
         hdr_count += 1;
@@ -360,6 +374,10 @@ pub const AnthropicProvider = struct {
         hdr_count += 1;
         if (isSetupToken(credential)) {
             headers_buf[hdr_count] = "anthropic-beta: oauth-2025-04-20";
+            hdr_count += 1;
+        }
+        for (attr_hdrs.slice()) |h| {
+            headers_buf[hdr_count] = h;
             hdr_count += 1;
         }
 

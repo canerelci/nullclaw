@@ -465,7 +465,11 @@ pub const OpenAiCompatibleProvider = struct {
         else
             null;
 
-        return sse.curlStream(allocator, url, body, auth_hdr, &.{}, request.timeout_secs, callback, callback_ctx);
+        // Pryva spend-attribution headers (gateway base_url only). Stack-lived; outlive the call.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, self.base_url);
+
+        return sse.curlStream(allocator, url, body, auth_hdr, attr_hdrs.slice(), request.timeout_secs, callback, callback_ctx);
     }
 
     fn supportsStreamingImpl(_: *anyopaque) bool {
@@ -547,11 +551,22 @@ pub const OpenAiCompatibleProvider = struct {
             if (a.needs_free) allocator.free(a.value);
         };
 
+        // Pryva spend-attribution headers (gateway base_url only). Stack-lived; outlive the call.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, self.base_url);
+
         const resp_body = if (auth) |a| blk: {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "{s}: {s}", .{ a.name, a.value }) catch return error.CompatibleApiError;
-            break :blk root.curlPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.CompatibleApiError;
-        } else root.curlPostTimed(allocator, url, body, &.{}, request.timeout_secs) catch return error.CompatibleApiError;
+            var headers_buf: [4][]const u8 = undefined;
+            headers_buf[0] = auth_hdr;
+            var hdr_count: usize = 1;
+            for (attr_hdrs.slice()) |h| {
+                headers_buf[hdr_count] = h;
+                hdr_count += 1;
+            }
+            break :blk root.curlPostTimed(allocator, url, body, headers_buf[0..hdr_count], request.timeout_secs) catch return error.CompatibleApiError;
+        } else root.curlPostTimed(allocator, url, body, attr_hdrs.slice(), request.timeout_secs) catch return error.CompatibleApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body) catch |err| {

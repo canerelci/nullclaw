@@ -145,3 +145,89 @@ docker-compose --profile agent up     # interactive agent
 ## License
 
 MIT License.
+
+---
+
+# Fork Ownership — `canerelci/nullclaw` (for Pryva)
+
+> Everything above this line is **upstream** (`nullclaw/nullclaw`) project guidance, inherited by
+> this fork and kept essentially intact. Everything below is **fork-specific** ownership for the
+> Pryva product. Treat them as two layers: upstream engineering protocol (above) + Pryva fork
+> discipline (below). When they conflict on a Pryva concern, the fork layer wins.
+
+## What this repo is
+
+- This is **`canerelci/nullclaw`** (origin), a fork of **`nullclaw/nullclaw`** (upstream). Working
+  directory: `~/dev/opensource/nullclaw`, branch `main`.
+- It is the **ONLY place NullClaw (NCW) is modified for Pryva** — never clone or edit NCW anywhere
+  else. The Pryva tenant image builds NCW **from this fork** (see `NULLCLAW_SHA` pin rule below).
+- Pryva uses NCW as a lightweight "doer" agent: the OpenClaw SOUL is the **thinker** (decides what),
+  an NCW specialist agent is the **doer** (calls MCP tools, returns strict JSON). This fork carries
+  the commits that enable that split (`--tools`/`--list-tools` gating, `NULLCLAW_TRACE_FILE`).
+
+## Sibling fork: OCW (OpenClaw)
+
+Pryva consumes **two** `canerelci` forks in the same tenant image — this one (NCW, the doer) and
+**OpenClaw / OCW** (`canerelci/openclaw`, the TypeScript orchestrator/pipeline + SOUL thinker). They
+have **independent** image pins (`NULLCLAW_SHA` / `OPENCLAW_SHA`) and build **separately** (law 1).
+OCW **owns the flow** (mints ids at `message_received`/`before_agent_start`, threads
+`PRYVA_FLOW_ID`/`X-Flow-Id`); NCW is **backend-driven, NOT an OCW subagent** — its completion
+re-enters the parent flow via the gateway `sessions.send` + `pryvaFlowId` seam (`ncw_completion`),
+which is exactly why `NULLCLAW_TRACE_FILE` unifies NCW internals into the OCW flow trace. OCW can also
+abort running NCW mid-flight (`/pipeline/steer-check`). Full relationship:
+`.claude/memory/ocw-relationship.md`.
+
+## ⛔ HARD RULE — the `NULLCLAW_SHA` pin (owner-mandated)
+
+The Pryva assistant image (`~/dev/source/midmen` → `infra/docker-user/Dockerfile`) builds NCW pinned
+at `ARG NULLCLAW_SHA=<commit>` (with `ARG NULLCLAW_REF=main`). The Dockerfile `git clone`s this fork
+and **asserts the cloned commit equals the pin — it FAILS the build if the fork moved without a bump**.
+Therefore: **a fork change is NOT in any tenant until `NULLCLAW_SHA` is bumped to the new fork HEAD
+AND the image is rebuilt.** A local checkout / working tree is NOT the built image.
+
+- After committing+pushing a fork change meant for tenants: state the new fork HEAD SHA and that
+  midmen's `NULLCLAW_SHA` must be bumped to it before rebuild.
+- Before claiming a fork change is "live" in a tenant: verify the built image (`nullclaw --version`
+  inside the container), not the working tree.
+- This side and the midmen agent both own this check — don't assume the other did it.
+
+## The three laws (NCW build discipline)
+
+1. **OCW and NCW builds are handled separately.** When this fork changes, produce a fresh NCW build
+   of both archs and retire the old one. Never silently ship a stale NCW build alongside an OCW bump.
+2. **The Pryva image MUST consume this prepared fork build** — reproducible Dockerfile build from
+   `github.com/canerelci/nullclaw`, never a hand-baked or checked-in binary as the shipped artifact.
+3. **When the image is built, DOUBLE-CHECK it was built from the correct sources** — verify, never
+   assume. (Owner: *"Bir kez bile atlamanı istemiyorum."*)
+
+Full checklist (both-arch rebuild, `nullclaw-bin` copy-back, `NULLCLAW_SHA` bump, image verify gate,
+upstream rebase recipe): **`.claude/rules/fork-build.md`**.
+
+## Validation (required before any fork commit)
+
+```bash
+zig version                       # MUST be exactly 0.15.2
+zig build test --summary all      # all tests pass, 0 leaks (this is the gate)
+zig fmt --check src/              # formatting (pre-commit hook enforces this)
+zig build -Doptimize=ReleaseSmall # release build compiles clean (both archs for releases)
+```
+
+No stubs/placeholders/TODOs — deliver full working code, verify live before reporting done. Match the
+vtable-driven architecture and naming in `AGENTS.md`. Read `AGENTS.md` before any code change.
+
+## Do-not
+
+- Do **not** push to upstream `nullclaw/nullclaw` — our changes live only in `canerelci/nullclaw`.
+- Do **not** modify NCW anywhere but this repo.
+- Do **not** hand-bake a binary into the Pryva image as the shipped artifact.
+- Do **not** edit the upstream content above the banner — keep the fork layer separate.
+
+## Where the detail lives
+
+- `.claude/rules/fork-build.md` — NCW build/pin/rebase discipline + checklists.
+- `.claude/skills/` — `ncw-fork-build` (ship a change), `ncw-rebase-upstream` (take an upstream
+  release), `pryva-specialist-fork` (what the Pryva commits wired + thinker/doer split).
+- `.claude/memory/MEMORY.md` — index of fork state (canonical path, commits ahead, pin, how Pryva
+  invokes, validation).
+- The Pryva/midmen side: `~/dev/source/midmen/.claude/skills/nullclaw/` + `ncw-agent/` + memory
+  `ocw_ncw_fork_is_canonical` (the cross-repo source of truth for the fork-canonical incident).

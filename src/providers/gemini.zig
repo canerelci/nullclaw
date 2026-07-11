@@ -822,12 +822,24 @@ pub const GeminiProvider = struct {
         const body = try buildChatRequestBody(allocator, request, temperature);
         defer allocator.free(body);
 
+        // Pryva spend-attribution headers — no-op here (BASE_URL is not the gateway), added for
+        // completeness so every provider carries the plumbing.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, BASE_URL);
+
         const resp_body = if (auth.isApiKey())
-            root.curlPostTimed(allocator, url, body, &.{}, request.timeout_secs) catch return error.GeminiApiError
+            root.curlPostTimed(allocator, url, body, attr_hdrs.slice(), request.timeout_secs) catch return error.GeminiApiError
         else blk: {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
-            break :blk root.curlPostTimed(allocator, url, body, &.{auth_hdr}, request.timeout_secs) catch return error.GeminiApiError;
+            var headers_buf: [4][]const u8 = undefined;
+            headers_buf[0] = auth_hdr;
+            var hdr_count: usize = 1;
+            for (attr_hdrs.slice()) |h| {
+                headers_buf[hdr_count] = h;
+                hdr_count += 1;
+            }
+            break :blk root.curlPostTimed(allocator, url, body, headers_buf[0..hdr_count], request.timeout_secs) catch return error.GeminiApiError;
         };
         defer allocator.free(resp_body);
 
@@ -881,13 +893,24 @@ pub const GeminiProvider = struct {
         const body = try buildChatRequestBody(allocator, request, temperature);
         defer allocator.free(body);
 
+        // Pryva spend-attribution headers — no-op here (BASE_URL is not the gateway), added for
+        // completeness so every provider carries the plumbing.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, BASE_URL);
+
         if (auth.isApiKey()) {
-            return curlStreamGemini(allocator, url, body, &.{}, request.timeout_secs, callback, callback_ctx);
+            return curlStreamGemini(allocator, url, body, attr_hdrs.slice(), request.timeout_secs, callback, callback_ctx);
         } else {
             var auth_hdr_buf: [512]u8 = undefined;
             const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{auth.credential()}) catch return error.GeminiApiError;
-            const headers = [_][]const u8{auth_hdr};
-            return curlStreamGemini(allocator, url, body, &headers, request.timeout_secs, callback, callback_ctx);
+            var headers_buf: [4][]const u8 = undefined;
+            headers_buf[0] = auth_hdr;
+            var hdr_count: usize = 1;
+            for (attr_hdrs.slice()) |h| {
+                headers_buf[hdr_count] = h;
+                hdr_count += 1;
+            }
+            return curlStreamGemini(allocator, url, body, headers_buf[0..hdr_count], request.timeout_secs, callback, callback_ctx);
         }
     }
 };

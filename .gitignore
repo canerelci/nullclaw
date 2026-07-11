@@ -18,3 +18,6 @@ result
 .direnv/
 .worktrees
 config.signal.json
+
+# Local-only Claude Code working docs (skills/memory/rules/settings) — never ship to the fork.
+.claude/

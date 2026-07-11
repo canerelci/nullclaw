@@ -221,6 +221,13 @@ pub const Agent = struct {
     mem_rt: ?*memory_mod.MemoryRuntime = null,
     /// Optional session scope for memory read/write operations.
     memory_session_id: ?[]const u8 = null,
+    /// Pryva spend-attribution: the specialist agent name for THIS run (planner/copywriter/
+    /// image_director/reviewer/researcher/…). Set by the caller after fromConfig — from the
+    /// PRYVA_NCW_AGENT env var (subprocess `nullclaw agent` path) or the webhook body `agent`
+    /// field (gateway path). Borrowed; must outlive the agent's turn. null → "unknown".
+    /// Flows onto every outbound LLM call's X-Pryva-* headers when the provider is the gateway.
+    caller_agent: ?[]const u8 = null,
+    caller_agent_owned: bool = false,
     observer: Observer,
     model_name: []const u8,
     model_name_owned: bool = false,
@@ -391,11 +398,20 @@ pub const Agent = struct {
         if (self.pending_exec_command_owned and self.pending_exec_command != null) self.allocator.free(self.pending_exec_command.?);
         if (self.focus_target_owned and self.focus_target != null) self.allocator.free(self.focus_target.?);
         if (self.dock_target_owned and self.dock_target != null) self.allocator.free(self.dock_target.?);
+        if (self.caller_agent_owned and self.caller_agent != null) self.allocator.free(self.caller_agent.?);
         for (self.history.items) |*msg| {
             msg.deinit(self.allocator);
         }
         self.history.deinit(self.allocator);
         self.allocator.free(self.tool_specs);
+    }
+
+    /// Build the Pryva spend-attribution for this agent's outbound LLM calls. Fail-open:
+    /// a missing agent name collapses to "unknown". `task` mirrors the agent name (we have no
+    /// finer operation label at the provider boundary; the flow_id carries per-op correlation).
+    pub fn attribution(self: *const Agent) providers.Attribution {
+        const name = self.caller_agent orelse "unknown";
+        return .{ .agent = name, .task = name };
     }
 
     /// Estimate total tokens in conversation history.
@@ -815,6 +831,7 @@ pub const Agent = struct {
                         .tools = null,
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
+                        .attribution = self.attribution(),
                     },
                     self.model_name,
                     self.temperature,
@@ -850,6 +867,7 @@ pub const Agent = struct {
                         .tools = if (native_tools_enabled) self.tool_specs else null,
                         .timeout_secs = self.message_timeout_secs,
                         .reasoning_effort = self.reasoning_effort,
+                        .attribution = self.attribution(),
                     },
                     self.model_name,
                     self.temperature,
@@ -885,6 +903,7 @@ pub const Agent = struct {
                                 .tools = if (native_tools_enabled) self.tool_specs else null,
                                 .timeout_secs = self.message_timeout_secs,
                                 .reasoning_effort = self.reasoning_effort,
+                                .attribution = self.attribution(),
                             },
                             self.model_name,
                             self.temperature,
@@ -905,6 +924,7 @@ pub const Agent = struct {
                             .tools = if (native_tools_enabled) self.tool_specs else null,
                             .timeout_secs = self.message_timeout_secs,
                             .reasoning_effort = self.reasoning_effort,
+                            .attribution = self.attribution(),
                         },
                         self.model_name,
                         self.temperature,

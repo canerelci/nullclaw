@@ -247,6 +247,66 @@ pub const ToolSpec = struct {
     parameters_json: []const u8 = "{}",
 };
 
+/// Pryva spend-attribution for an outbound LLM call. The Pryva gateway reads the
+/// three X-Pryva-* headers to attribute each call's spend to the right caller/agent/task.
+/// `caller` is always "ncw" for NullClaw. `agent` is the current specialist agent name
+/// (planner/copywriter/image_director/reviewer/researcher/…) or "unknown". `task` is an
+/// operation label if known, else the agent name, else "unknown".
+pub const Attribution = struct {
+    agent: []const u8,
+    task: []const u8,
+
+    pub const CALLER = "ncw";
+};
+
+/// Renders the three X-Pryva-* attribution headers into owned stack buffers.
+///
+/// The header slices returned by `slice()` borrow this struct's internal buffers, so the
+/// AttributionHeaders value MUST outlive the curl call that consumes them (declare it in
+/// the same function scope as the curl call — mirrors how auth/version headers live on the
+/// stack there). Fail-open: on any formatting overflow the offending header is dropped
+/// rather than erroring the LLM call. Empty agent/task collapse to "unknown".
+pub const AttributionHeaders = struct {
+    caller_buf: [64]u8 = undefined,
+    agent_buf: [256]u8 = undefined,
+    task_buf: [256]u8 = undefined,
+    hdrs: [3][]const u8 = undefined,
+    count: usize = 0,
+
+    /// Populate `self` (declared by the caller in the SAME scope as the curl call) with the
+    /// attribution headers for `req` IF it carries attribution AND `base_url` looks like the
+    /// Pryva gateway (contains "/llm/"). Otherwise leaves `self` empty so the headers never
+    /// leak to a direct provider endpoint. Never errors.
+    ///
+    /// This is an IN-PLACE builder (not returned by value): the header slices in `hdrs` point
+    /// into this struct's own buffers, so it must not be copied/moved after `build`.
+    pub fn build(self: *AttributionHeaders, req: ChatRequest, base_url: []const u8) void {
+        self.count = 0;
+        const attr = req.attribution orelse return;
+        if (std.mem.indexOf(u8, base_url, "/llm/") == null) return;
+
+        const agent = if (attr.agent.len > 0) attr.agent else "unknown";
+        const task = if (attr.task.len > 0) attr.task else agent;
+
+        if (std.fmt.bufPrint(&self.caller_buf, "X-Pryva-Caller: {s}", .{Attribution.CALLER})) |h| {
+            self.hdrs[self.count] = h;
+            self.count += 1;
+        } else |_| {}
+        if (std.fmt.bufPrint(&self.agent_buf, "X-Pryva-Agent: {s}", .{agent})) |h| {
+            self.hdrs[self.count] = h;
+            self.count += 1;
+        } else |_| {}
+        if (std.fmt.bufPrint(&self.task_buf, "X-Pryva-Task: {s}", .{task})) |h| {
+            self.hdrs[self.count] = h;
+            self.count += 1;
+        } else |_| {}
+    }
+
+    pub fn slice(self: *const AttributionHeaders) []const []const u8 {
+        return self.hdrs[0..self.count];
+    }
+};
+
 /// Request payload for provider chat calls.
 pub const ChatRequest = struct {
     messages: []const ChatMessage,
@@ -258,6 +318,9 @@ pub const ChatRequest = struct {
     timeout_secs: u64 = 0,
     /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
     reasoning_effort: ?[]const u8 = null,
+    /// Optional Pryva spend-attribution. When present AND the provider base_url is the
+    /// gateway (contains "/llm/"), the concrete provider appends the three X-Pryva-* headers.
+    attribution: ?Attribution = null,
 };
 
 /// A single tool result message in a conversation.

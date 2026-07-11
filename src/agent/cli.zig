@@ -28,6 +28,19 @@ const CliStreamCtx = struct {
     sink: streaming.Sink,
 };
 
+/// Read the Pryva specialist-agent name for spend attribution from the PRYVA_NCW_AGENT env
+/// var (set by the backend in the `nullclaw agent` subprocess's env). Returns an owned dupe
+/// (caller must free / hand to Agent.caller_agent with caller_agent_owned=true), or null when
+/// unset/empty. Fail-open: any error yields null so a missing name never blocks the run.
+fn resolveCallerAgent(allocator: std.mem.Allocator) ?[]const u8 {
+    const raw = std.process.getEnvVarOwned(allocator, "PRYVA_NCW_AGENT") catch return null;
+    if (raw.len == 0) {
+        allocator.free(raw);
+        return null;
+    }
+    return raw;
+}
+
 fn cliStreamSinkCallback(_: *anyopaque, event: streaming.Event) void {
     if (event.stage != .chunk or event.text.len == 0) return;
     var buf: [4096]u8 = undefined;
@@ -320,6 +333,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         if (session_id) |sid| {
             agent.memory_session_id = sid;
         }
+        if (resolveCallerAgent(allocator)) |ca| {
+            agent.caller_agent = ca;
+            agent.caller_agent_owned = true;
+        }
         defer agent.deinit();
 
         // Enable streaming if provider supports it
@@ -413,6 +430,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     agent.mem_rt = if (mem_rt) |*rt| rt else null;
     if (session_id) |sid| {
         agent.memory_session_id = sid;
+    }
+    if (resolveCallerAgent(allocator)) |ca| {
+        agent.caller_agent = ca;
+        agent.caller_agent_owned = true;
     }
     defer agent.deinit();
 

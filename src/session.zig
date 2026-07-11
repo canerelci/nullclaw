@@ -202,6 +202,20 @@ pub const SessionManager = struct {
         return self.processMessageStreaming(session_key, content, conversation_context, null);
     }
 
+    /// Like `processMessage` but binds a Pryva spend-attribution agent name (from the webhook
+    /// body's `agent` field) to the session's agent FOR THIS TURN only. `caller_agent` is
+    /// borrowed and must outlive the synchronous call (it does — it lives in the request arena).
+    /// It is restored to null after the turn so a cached session isn't pinned to one agent name.
+    pub fn processMessageAs(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        conversation_context: ?ConversationContext,
+        caller_agent: ?[]const u8,
+    ) ![]const u8 {
+        return self.processMessageStreamingAs(session_key, content, conversation_context, null, caller_agent);
+    }
+
     /// Process a message within a session context and optionally forward text deltas.
     /// Deltas are only emitted when provider streaming is active.
     pub fn processMessageStreaming(
@@ -210,6 +224,19 @@ pub const SessionManager = struct {
         content: []const u8,
         conversation_context: ?ConversationContext,
         stream_sink: ?streaming.Sink,
+    ) ![]const u8 {
+        return self.processMessageStreamingAs(session_key, content, conversation_context, stream_sink, null);
+    }
+
+    /// Full implementation of `processMessageStreaming` plus an optional per-turn Pryva
+    /// spend-attribution agent name bound to the session's agent for THIS turn only.
+    pub fn processMessageStreamingAs(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        conversation_context: ?ConversationContext,
+        stream_sink: ?streaming.Sink,
+        caller_agent: ?[]const u8,
     ) ![]const u8 {
         const channel = if (conversation_context) |ctx| (ctx.channel orelse "unknown") else "unknown";
         const session_hash = std.hash.Wyhash.hash(0, session_key);
@@ -239,6 +266,20 @@ pub const SessionManager = struct {
         // Set conversation context for this turn (Signal-specific for now)
         session.agent.conversation_context = conversation_context;
         defer session.agent.conversation_context = null;
+
+        // Bind the Pryva spend-attribution agent name for THIS turn only (borrowed; restored
+        // after so a cached session isn't pinned to one agent). Only overrides when provided —
+        // preserves any owned name set at agent construction (e.g. CLI path).
+        const prev_caller_agent = session.agent.caller_agent;
+        const prev_caller_agent_owned = session.agent.caller_agent_owned;
+        if (caller_agent) |ca| {
+            session.agent.caller_agent = ca;
+            session.agent.caller_agent_owned = false;
+        }
+        defer {
+            session.agent.caller_agent = prev_caller_agent;
+            session.agent.caller_agent_owned = prev_caller_agent_owned;
+        }
 
         const prev_stream_callback = session.agent.stream_callback;
         const prev_stream_ctx = session.agent.stream_ctx;

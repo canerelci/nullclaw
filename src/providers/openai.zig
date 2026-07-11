@@ -197,7 +197,12 @@ pub const OpenAiProvider = struct {
         var auth_hdr_buf: [512]u8 = undefined;
         const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{api_key}) catch return error.OpenAiApiError;
 
-        return sse.curlStream(allocator, BASE_URL, body, auth_hdr, &.{}, request.timeout_secs, callback, callback_ctx);
+        // Pryva spend-attribution headers — no-op here (BASE_URL is not the gateway), added for
+        // completeness so every provider carries the plumbing.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, BASE_URL);
+
+        return sse.curlStream(allocator, BASE_URL, body, auth_hdr, attr_hdrs.slice(), request.timeout_secs, callback, callback_ctx);
     }
 
     fn supportsStreamingImpl(_: *anyopaque) bool {
@@ -243,7 +248,19 @@ pub const OpenAiProvider = struct {
         var auth_hdr_buf: [512]u8 = undefined;
         const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "Authorization: Bearer {s}", .{api_key}) catch return error.OpenAiApiError;
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, &.{auth_hdr}, request.timeout_secs) catch return error.OpenAiApiError;
+        // Pryva spend-attribution headers — no-op here (BASE_URL is not the gateway), added for
+        // completeness so every provider carries the plumbing.
+        var attr_hdrs: root.AttributionHeaders = .{};
+        attr_hdrs.build(request, BASE_URL);
+        var headers_buf: [4][]const u8 = undefined;
+        headers_buf[0] = auth_hdr;
+        var hdr_count: usize = 1;
+        for (attr_hdrs.slice()) |h| {
+            headers_buf[hdr_count] = h;
+            hdr_count += 1;
+        }
+
+        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, headers_buf[0..hdr_count], request.timeout_secs) catch return error.OpenAiApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);

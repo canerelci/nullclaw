@@ -2708,6 +2708,10 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                         const body = extractBody(raw);
                         if (body) |b| {
                             const msg_text = jsonStringField(b, "message") orelse jsonStringField(b, "text") orelse b;
+                            // Pryva spend-attribution: the specialist agent this webhook targets
+                            // (planner/copywriter/image_director/reviewer/researcher/…). Borrowed
+                            // from the raw request buffer, which outlives the synchronous turn.
+                            const caller_agent = jsonStringField(b, "agent");
                             var sk_buf: [128]u8 = undefined;
                             const session_key = std.fmt.bufPrint(&sk_buf, "webhook:{s}", .{bearer orelse "anon"}) catch "webhook:anon";
 
@@ -2716,7 +2720,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                                 response_body = "{\"status\":\"received\"}";
                             } else if (session_mgr_opt) |*sm| {
                                 const start_seq = gateway_thread_observer.currentSeq();
-                                const reply: ?[]const u8 = sm.processMessage(session_key, msg_text, null) catch |err| blk: {
+                                const reply: ?[]const u8 = sm.processMessageAs(session_key, msg_text, null, caller_agent) catch |err| blk: {
                                     response_body = userFacingAgentErrorJson(err);
                                     break :blk null;
                                 };
